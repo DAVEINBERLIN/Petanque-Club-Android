@@ -34,6 +34,18 @@ jobs:
           test -f Petanque-Club-Android-STORE-V1.zip || (echo "Missing Petanque-Club-Android-STORE-V1.zip" && exit 1)
           unzip -q -o Petanque-Club-Android-STORE-V1.zip
 
+      - name: Enable BuildConfig generation
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          p = Path('Petanque-Club-Android-STORE-V1/app/build.gradle')
+          s = p.read_text()
+          needle = 'android {\n'
+          if 'buildConfig true' not in s:
+              s = s.replace(needle, needle + "    buildFeatures {\n        buildConfig true\n    }\n\n", 1)
+          p.write_text(s)
+          PY
+
       - name: Build installable debug APK
         working-directory: Petanque-Club-Android-STORE-V1
         run: gradle :app:assembleDebug
