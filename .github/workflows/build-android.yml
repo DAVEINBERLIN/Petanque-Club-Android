@@ -1,0 +1,52 @@
+name: Build Petanque Club APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK 36
+        run: sdkmanager "platforms;android-36" "build-tools;35.0.0"
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.13'
+
+      - name: Extract Android project
+        run: |
+          test -f Petanque-Club-Android-STORE-V1.zip || (echo "Missing Petanque-Club-Android-STORE-V1.zip" && exit 1)
+          unzip -q -o Petanque-Club-Android-STORE-V1.zip
+
+      - name: Build installable debug APK
+        working-directory: Petanque-Club-Android-STORE-V1
+        run: gradle :app:assembleDebug
+
+      - name: Build Play Store AAB
+        working-directory: Petanque-Club-Android-STORE-V1
+        run: gradle :app:bundleRelease
+
+      - name: Upload APK and AAB
+        uses: actions/upload-artifact@v4
+        with:
+          name: petanque-club-android-builds
+          path: |
+            Petanque-Club-Android-STORE-V1/app/build/outputs/apk/debug/*.apk
+            Petanque-Club-Android-STORE-V1/app/build/outputs/bundle/release/*.aab
+          if-no-files-found: error
