@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 from __future__ import annotations
-import json, os, re, sys, time
+import json, os, re, sys
 from pathlib import Path
 from urllib.parse import urljoin, urlparse, unquote
 from urllib.request import Request, urlopen
@@ -24,7 +24,7 @@ def request_bytes(url:str):
         return r.read(), r.headers.get_content_type(), r.geturl()
 
 def norm_path(raw:str, current_url:str):
-    raw=raw.strip().strip('"\'')
+    raw=raw.strip().strip("\"'")
     if not raw or raw.startswith(('#','data:','blob:','javascript:','mailto:','tel:')):
         return None
     full=urljoin(current_url, raw)
@@ -88,7 +88,6 @@ for token in required_tokens:
     if token not in html and not any(token in p.name for p in OUT.rglob('*')):
         raise SystemExit(f'V129 non détectée ou ressource absente: {token}')
 
-# Injecte le pont Android avant le code applicatif.
 if 'android-native.js?v=131' not in html:
     if re.search(r'<head[^>]*>', html, flags=re.I):
         html=re.sub(r'(<head[^>]*>)', r'\1\n<script src="/android-native.js?v=131"></script>', html, count=1, flags=re.I)
@@ -194,7 +193,6 @@ bridge=r'''(() => {
 '''
 (OUT/'android-native.js').write_text(bridge,'utf-8')
 
-# Icône de lancement depuis le manifest PWA.
 manifest_path=OUT/'manifest.webmanifest'
 icon_url=None
 if manifest_path.exists():
@@ -203,7 +201,8 @@ if manifest_path.exists():
         icons=manifest.get('icons') or []
         def score(item):
             sizes=str(item.get('sizes',''))
-            return (512 in [int(x.split('x')[0]) for x in sizes.split() if 'x' in x and x.split('x')[0].isdigit()], '512' in sizes, sizes)
+            nums=[int(x.split('x')[0]) for x in sizes.split() if 'x' in x and x.split('x')[0].isdigit()]
+            return (512 in nums, max(nums) if nums else 0)
         for item in sorted(icons, key=score, reverse=True):
             src=item.get('src')
             if src:
@@ -227,4 +226,3 @@ else:
 
 print(f'Miroir V129 Android: {len([p for p in OUT.rglob("*") if p.is_file()])} fichiers')
 print(f'Erreurs non bloquantes: {len(errors)}')
-'''
