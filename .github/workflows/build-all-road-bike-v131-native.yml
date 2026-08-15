@@ -1,0 +1,147 @@
+name: Build and verify ALL ROAD BIKE V131 Native
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ all-road-bike-v131-native ]
+
+jobs:
+  build-and-device-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    env:
+      ARB_SITE: https://artfelt-griffin-1f8222.netlify.app
+      APK_NAME: ALL-ROAD-BIKE-V131.apk
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK 36
+        run: sdkmanager "platforms;android-36" "build-tools;35.0.0" "platform-tools"
+
+      - name: Setup Gradle 8.13
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.13'
+
+      - name: Mirror and validate ALL ROAD BIKE V129 web app
+        working-directory: all-road-bike-v131
+        run: |
+          python -m py_compile mirror_site.py
+          python mirror_site.py "$ARB_SITE"
+          test -f app/src/main/assets/index.html
+          test -f app/src/main/assets/veloplan.js
+          test -f app/src/main/assets/saved-routes-v129.css
+          test -f app/src/main/assets/android-native.js
+          test -f app/src/main/res/drawable-nodpi/app_icon.png
+          grep -q "saved-routes-v129.css" app/src/main/assets/index.html
+          grep -q "android-native.js?v=131" app/src/main/assets/index.html
+          COUNT=$(find app/src/main/assets -type f | wc -l)
+          echo "Embedded runtime files: $COUNT"
+          test "$COUNT" -ge 25
+          du -sh app/src/main/assets
+
+      - name: Build installable native APK
+        working-directory: all-road-bike-v131
+        run: gradle :app:assembleDebug --stacktrace
+
+      - name: Rename APK
+        run: cp all-road-bike-v131/app/build/outputs/apk/debug/app-debug.apk "$APK_NAME"
+
+      - name: Verify package, signature and embedded application
+        run: |
+          set -euxo pipefail
+          AAPT="$ANDROID_HOME/build-tools/35.0.0/aapt"
+          APKSIGNER="$ANDROID_HOME/build-tools/35.0.0/apksigner"
+          test -s "$APK_NAME"
+          "$APKSIGNER" verify --verbose --print-certs "$APK_NAME" | tee apksigner.txt
+          "$AAPT" dump badging "$APK_NAME" | tee badging.txt
+          grep -q "package: name='com.allroadbike.app' versionCode='131' versionName='1.31'" badging.txt
+          grep -q "application-label:'ALL ROAD BIKE'" badging.txt
+          unzip -l "$APK_NAME" | tee apk-files.txt
+          grep -q "assets/index.html" apk-files.txt
+          grep -q "assets/veloplan.js" apk-files.txt
+          grep -q "assets/saved-routes-v129.css" apk-files.txt
+          grep -q "assets/android-native.js" apk-files.txt
+          grep -q "res/drawable-nodpi" apk-files.txt || true
+          sha256sum "$APK_NAME" | tee SHA256.txt
+
+      - name: Install and smoke-test on Android emulator
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 35
+          arch: x86_64
+          profile: pixel_6
+          disable-animations: true
+          disk-size: 4096M
+          script: |
+            set -euxo pipefail
+            adb install -r "$GITHUB_WORKSPACE/$APK_NAME"
+            adb shell pm grant com.allroadbike.app android.permission.ACCESS_FINE_LOCATION || true
+            adb shell pm grant com.allroadbike.app android.permission.ACCESS_COARSE_LOCATION || true
+            adb shell pm grant com.allroadbike.app android.permission.CAMERA || true
+            adb shell pm grant com.allroadbike.app android.permission.RECORD_AUDIO || true
+            adb shell pm grant com.allroadbike.app android.permission.POST_NOTIFICATIONS || true
+            adb shell am force-stop com.allroadbike.app
+            adb shell monkey -p com.allroadbike.app -c android.intent.category.LAUNCHER 1
+            sleep 12
+            adb shell pm path com.allroadbike.app | tee installed-package.txt
+            adb shell dumpsys window | grep -E "mCurrentFocus|mFocusedApp" | tee focus.txt
+            grep -q "com.allroadbike.app" focus.txt
+            adb shell uiautomator dump /sdcard/window.xml || true
+            adb pull /sdcard/window.xml window-online.xml || true
+            grep -q "ALL ROAD BIKE" window-online.xml
+            PID=$(adb shell pidof -s com.allroadbike.app)
+            test -n "$PID"
+            adb logcat -d --pid="$PID" | tee app-log-online.txt
+            ! grep -q "FATAL EXCEPTION" app-log-online.txt
+            adb exec-out screencap -p > v131-online.png
+
+            # Second launch without network proves that the UI is embedded in the APK,
+            # rather than being a Chrome/PWA shortcut or remote-only wrapper.
+            adb shell svc wifi disable || true
+            adb shell svc data disable || true
+            adb shell am force-stop com.allroadbike.app
+            adb shell monkey -p com.allroadbike.app -c android.intent.category.LAUNCHER 1
+            sleep 7
+            adb shell uiautomator dump /sdcard/window-offline.xml || true
+            adb pull /sdcard/window-offline.xml window-offline.xml || true
+            grep -q "ALL ROAD BIKE" window-offline.xml
+            adb shell dumpsys window | grep -E "mCurrentFocus|mFocusedApp" | tee focus-offline.txt
+            grep -q "com.allroadbike.app" focus-offline.txt
+            PID=$(adb shell pidof -s com.allroadbike.app)
+            test -n "$PID"
+            adb logcat -d --pid="$PID" | tee app-log-offline.txt
+            ! grep -q "FATAL EXCEPTION" app-log-offline.txt
+            adb exec-out screencap -p > v131-offline.png
+
+      - name: Upload verified APK and device-test evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: ALL-ROAD-BIKE-V131-NATIVE-VERIFIED
+          path: |
+            ALL-ROAD-BIKE-V131.apk
+            SHA256.txt
+            badging.txt
+            apksigner.txt
+            apk-files.txt
+            installed-package.txt
+            focus.txt
+            focus-offline.txt
+            window-online.xml
+            window-offline.xml
+            app-log-online.txt
+            app-log-offline.txt
+            v131-online.png
+            v131-offline.png
+          if-no-files-found: error
