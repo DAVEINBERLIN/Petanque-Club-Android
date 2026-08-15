@@ -66,7 +66,8 @@ while queue:
     try:
         data, ctype, final_url=request_bytes(url)
     except (HTTPError, URLError, TimeoutError) as e:
-        if path in ('/index.html','/manifest.webmanifest','/sw.js'):
+        print(f'WARN {path}: {e}')
+        if path == '/index.html':
             raise
         errors.append((path,str(e)))
         continue
