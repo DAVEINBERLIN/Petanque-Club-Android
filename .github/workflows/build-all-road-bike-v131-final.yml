@@ -1,0 +1,131 @@
+name: FINAL ALL ROAD BIKE V131 Standalone
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ all-road-bike-v131-standalone ]
+    paths:
+      - 'all-road-bike-v131/**'
+      - '.github/workflows/build-all-road-bike-v131-final.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  verified-apk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK
+        run: sdkmanager "platforms;android-36" "platform-tools" "build-tools;35.0.0"
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.13'
+
+      - name: Freeze V129 web app into Android assets
+        working-directory: all-road-bike-v131
+        run: python fetch_v129.py
+
+      - name: Prove frozen V129 payload before compilation
+        run: |
+          A=all-road-bike-v131/app/src/main/assets/www
+          grep -q 'saved-routes-v129.css?v=129' "$A/index.html"
+          test -s "$A/veloplan.js"
+          test -s "$A/ride-dashboard.js"
+          test -s "$A/mobile-v121.js"
+          test -s all-road-bike-v131/app/src/main/res/drawable/app_logo.png
+          echo "Embedded runtime files: $(find "$A" -type f | wc -l)"
+          echo "Embedded runtime bytes: $(du -sb "$A" | cut -f1)"
+
+      - name: Build APK
+        working-directory: all-road-bike-v131
+        run: gradle :app:assembleDebug --stacktrace
+
+      - name: Verify Android package, signature and embedded V129 files
+        run: |
+          APK=all-road-bike-v131/app/build/outputs/apk/debug/app-debug.apk
+          test -s "$APK"
+          "$ANDROID_HOME/build-tools/35.0.0/aapt" dump badging "$APK" > badging.txt
+          cat badging.txt
+          grep -q "package: name='com.allroadbike.app' versionCode='131' versionName='1.31'" badging.txt
+          grep -q "application-label:'ALL ROAD BIKE'" badging.txt
+          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose --print-certs "$APK" > signature.txt
+          cat signature.txt
+          unzip -l "$APK" > apk-files.txt
+          for F in index.html veloplan.js saved-routes-v129.css ride-dashboard.js mobile-v121.js profile-v126.js; do
+            grep -q "assets/www/$F" apk-files.txt || { echo "Missing embedded $F"; exit 1; }
+          done
+          cp "$APK" ALL-ROAD-BIKE-V131.apk
+          sha256sum ALL-ROAD-BIKE-V131.apk > ALL-ROAD-BIKE-V131.sha256
+          ls -lh ALL-ROAD-BIKE-V131.apk
+          cat ALL-ROAD-BIKE-V131.sha256
+
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm || true
+
+      - name: Offline install and launch test in Pixel emulator
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 35
+          target: google_apis
+          arch: x86_64
+          profile: pixel_6
+          disable-animations: true
+          emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -noaudio -no-boot-anim
+          script: |
+            adb install -r ALL-ROAD-BIKE-V131.apk
+            adb shell pm list packages | grep -q '^package:com.allroadbike.app$'
+            adb shell svc wifi disable || true
+            adb shell svc data disable || true
+            adb shell settings put global airplane_mode_on 1 || true
+            adb logcat -c
+            adb shell am force-stop com.allroadbike.app
+            adb shell am start -W -n com.allroadbike.app/.MainActivity | tee start.txt
+            grep -q 'Status: ok' start.txt
+            sleep 18
+            adb shell dumpsys activity activities | grep -q 'com.allroadbike.app/.MainActivity'
+            adb logcat -d > logcat.txt
+            grep -q 'ALLROAD.*LOCAL_APP_READY' logcat.txt
+            ! grep -q 'FATAL EXCEPTION' logcat.txt
+            adb shell uiautomator dump /sdcard/window.xml || true
+            adb pull /sdcard/window.xml window.xml || true
+            adb shell screencap -p /sdcard/ALL-ROAD-BIKE-V131-emulator.png
+            adb pull /sdcard/ALL-ROAD-BIKE-V131-emulator.png ALL-ROAD-BIKE-V131-emulator.png
+            test -s ALL-ROAD-BIKE-V131-emulator.png
+
+      - name: Publish only after every verification passed
+        run: |
+          mkdir -p verified-v131
+          cp ALL-ROAD-BIKE-V131.apk verified-v131/
+          cp ALL-ROAD-BIKE-V131.sha256 verified-v131/
+          cp ALL-ROAD-BIKE-V131-emulator.png verified-v131/
+          cp badging.txt signature.txt verified-v131/
+          git config user.name 'ALL ROAD BIKE Builder'
+          git config user.email 'actions@users.noreply.github.com'
+          git add -f verified-v131/
+          git commit -m 'Publish verified standalone ALL ROAD BIKE V131' || exit 0
+          git push origin HEAD:all-road-bike-v131-standalone
+
+      - name: Upload verified files
+        uses: actions/upload-artifact@v4
+        with:
+          name: ALL-ROAD-BIKE-V131-STANDALONE-VERIFIED
+          path: verified-v131/
+          if-no-files-found: error
+          retention-days: 90
