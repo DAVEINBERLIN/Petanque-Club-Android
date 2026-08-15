@@ -1,0 +1,63 @@
+name: Build ALL ROAD BIKE V130 APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ all-road-bike-v130-build ]
+    paths:
+      - 'all-road-bike-android/**'
+      - '.github/workflows/build-all-road-bike-v130.yml'
+
+jobs:
+  build-apk:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK 36
+        run: sdkmanager "platforms;android-36" "build-tools;35.0.0"
+
+      - name: Setup Gradle 8.13
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.13'
+
+      - name: Build installable APK
+        working-directory: all-road-bike-android
+        run: gradle :app:assembleDebug --stacktrace
+
+      - name: Rename APK
+        run: cp all-road-bike-android/app/build/outputs/apk/debug/app-debug.apk ALL-ROAD-BIKE-V130.apk
+
+      - name: Verify APK package and signature
+        run: |
+          set -euxo pipefail
+          test -s ALL-ROAD-BIKE-V130.apk
+          unzip -t ALL-ROAD-BIKE-V130.apk >/dev/null
+          "$ANDROID_HOME/build-tools/35.0.0/aapt" dump badging ALL-ROAD-BIKE-V130.apk | tee apk-badging.txt
+          grep -q "package: name='com.allroadbike.app' versionCode='130' versionName='1.30'" apk-badging.txt
+          grep -q "application-label:'ALL ROAD BIKE'" apk-badging.txt
+          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose --print-certs ALL-ROAD-BIKE-V130.apk | tee apk-signature.txt
+          sha256sum ALL-ROAD-BIKE-V130.apk | tee ALL-ROAD-BIKE-V130.sha256
+          ls -lh ALL-ROAD-BIKE-V130.apk
+
+      - name: Upload verified APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ALL-ROAD-BIKE-V130-verified-apk
+          path: |
+            ALL-ROAD-BIKE-V130.apk
+            ALL-ROAD-BIKE-V130.sha256
+            apk-badging.txt
+            apk-signature.txt
+          if-no-files-found: error
