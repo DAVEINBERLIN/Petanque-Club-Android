@@ -1,0 +1,213 @@
+name: Build and test ALL ROAD BIKE V131 Standalone
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ all-road-bike-v131-standalone ]
+    paths:
+      - 'all-road-bike-v131/**'
+      - '.github/workflows/build-all-road-bike-v131.yml'
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK
+        run: sdkmanager "platforms;android-36" "platform-tools" "build-tools;35.0.0"
+
+      - name: Setup Gradle 8.13
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.13'
+
+      - name: Download and freeze verified V129 web runtime into APK assets
+        env:
+          SITE: https://artfelt-griffin-1f8222.netlify.app
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          from urllib.request import Request, urlopen
+          from urllib.parse import urljoin, urlparse, urldefrag
+          import re, json, mimetypes
+
+          base='https://artfelt-griffin-1f8222.netlify.app/'
+          host=urlparse(base).netloc
+          root=Path('all-road-bike-v131/app/src/main/assets/www')
+          root.mkdir(parents=True, exist_ok=True)
+
+          def fetch(url):
+              req=Request(url, headers={'User-Agent':'ALL-ROAD-BIKE-V131-BUILDER/1.0'})
+              with urlopen(req, timeout=30) as r:
+                  return r.read(), r.headers.get('Content-Type','')
+
+          index_bytes,_=fetch(base+'index.html')
+          index_text=index_bytes.decode('utf-8','replace')
+          if 'saved-routes-v129.css?v=129' not in index_text:
+              raise SystemExit('FAIL: deployed site is not V129; refusing to build wrong APK')
+
+          queue=['index.html','manifest.webmanifest','sw.js']
+          seen=set()
+          text_ext={'.html','.htm','.css','.js','.json','.webmanifest','.txt','.md','.xml','.svg'}
+          asset_ext={'.html','.htm','.css','.js','.json','.webmanifest','.png','.jpg','.jpeg','.webp','.gif','.svg','.ico','.woff','.woff2','.ttf','.otf','.gpx','.geojson','.kml','.xml','.txt','.mp3','.wav','.m4a','.webm','.mp4'}
+
+          attr_re=re.compile(r'''(?:src|href)\s*=\s*["']([^"']+)["']''',re.I)
+          css_re=re.compile(r'''url\(\s*["']?([^\)"']+)''',re.I)
+          quote_re=re.compile(r'''["']((?:\.?\.?/|/)[^"'\s?#]+(?:\?[^"'\s#]*)?)["']''')
+
+          while queue:
+              rel=queue.pop(0)
+              rel=rel.split('#',1)[0]
+              if rel.startswith('/'):
+                  rel=rel[1:]
+              if not rel or rel in seen or rel.startswith('.netlify/functions/'):
+                  continue
+              seen.add(rel)
+              url=urljoin(base, rel)
+              try:
+                  data,ctype=fetch(url)
+              except Exception as e:
+                  print('SKIP',rel,e)
+                  continue
+              out=root/rel
+              out.parent.mkdir(parents=True,exist_ok=True)
+              out.write_bytes(data)
+              ext=Path(urlparse(rel).path).suffix.lower()
+              if ext in text_ext or 'text/' in ctype or 'javascript' in ctype or 'json' in ctype or 'xml' in ctype:
+                  text=data.decode('utf-8','replace')
+                  candidates=[]
+                  candidates += attr_re.findall(text)
+                  candidates += css_re.findall(text)
+                  candidates += quote_re.findall(text)
+                  for ref in candidates:
+                      ref=ref.strip()
+                      if not ref or ref.startswith(('data:','blob:','mailto:','tel:','javascript:','#')):
+                          continue
+                      absolute=urljoin(url,ref)
+                      p=urlparse(absolute)
+                      if p.netloc != host:
+                          continue
+                      path=p.path.lstrip('/')
+                      if not path or path.startswith('.netlify/functions/'):
+                          continue
+                      ext2=Path(path).suffix.lower()
+                      if ext2 in asset_ext or path in ('index.html','sw.js','manifest.webmanifest'):
+                          if path not in seen: queue.append(path)
+
+          critical=[
+            'index.html','styles.css','veloplan.js','sw.js','manifest.webmanifest',
+            'osaka-arcade-90-validated.css','v119-finitions.css',
+            'mobile-v121.css','mobile-v121.js','mobile-v122.css',
+            'profile-v126.js','saved-routes-v124.css','saved-routes-v125.css',
+            'saved-routes-v127.css','saved-routes-v128.css','saved-routes-v129.css',
+            'ride-dashboard.css','ride-dashboard.js'
+          ]
+          missing=[p for p in critical if not (root/p).is_file()]
+          if missing:
+              raise SystemExit('FAIL missing V129 runtime files: '+', '.join(missing))
+
+          # Disable PWA service-worker registration inside the native APK only.
+          # The web/PWA copy remains untouched; this frozen APK does not need SW to load local assets.
+          for p in root.rglob('*'):
+              if p.is_file() and p.suffix.lower() in {'.js','.html'}:
+                  try: s=p.read_text(encoding='utf-8')
+                  except Exception: continue
+                  s2=s.replace('navigator.serviceWorker.register(', 'false && navigator.serviceWorker.register(')
+                  if s2!=s: p.write_text(s2,encoding='utf-8')
+
+          # Use the exact app icon declared by the V129 manifest as Android launcher art.
+          manifest=json.loads((root/'manifest.webmanifest').read_text(encoding='utf-8'))
+          pngs=[x for x in manifest.get('icons',[]) if str(x.get('src','')).lower().split('?')[0].endswith('.png')]
+          if not pngs:
+              raise SystemExit('FAIL: no PNG launcher icon in V129 manifest')
+          def score(x):
+              sizes=str(x.get('sizes','0x0')).split()[0]
+              try: return int(sizes.split('x')[0])
+              except: return 0
+          icon=max(pngs,key=score)
+          icon_url=urljoin(base,icon['src'])
+          icon_bytes,_=fetch(icon_url)
+          if not icon_bytes.startswith(b'\x89PNG\r\n\x1a\n'):
+              raise SystemExit('FAIL: launcher icon is not PNG')
+          icon_out=Path('all-road-bike-v131/app/src/main/res/drawable/app_logo.png')
+          icon_out.parent.mkdir(parents=True,exist_ok=True)
+          icon_out.write_bytes(icon_bytes)
+
+          total=sum(p.stat().st_size for p in root.rglob('*') if p.is_file())
+          count=sum(1 for p in root.rglob('*') if p.is_file())
+          print(f'V129 runtime frozen: {count} files, {total/1024/1024:.2f} MiB')
+          print('Launcher icon:',icon['src'])
+          PY
+
+      - name: Build installable standalone APK
+        working-directory: all-road-bike-v131
+        run: gradle :app:assembleDebug --stacktrace
+
+      - name: Verify package, version, signature and embedded runtime
+        run: |
+          APK=all-road-bike-v131/app/build/outputs/apk/debug/app-debug.apk
+          test -s "$APK"
+          "$ANDROID_HOME/build-tools/35.0.0/aapt" dump badging "$APK" | tee /tmp/badging.txt
+          grep -q "package: name='com.allroadbike.app' versionCode='131' versionName='1.31'" /tmp/badging.txt
+          grep -q "application-label:'ALL ROAD BIKE'" /tmp/badging.txt
+          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose --print-certs "$APK" | tee /tmp/signature.txt
+          unzip -l "$APK" | tee /tmp/apk-files.txt
+          grep -q 'assets/www/index.html' /tmp/apk-files.txt
+          grep -q 'assets/www/veloplan.js' /tmp/apk-files.txt
+          grep -q 'assets/www/saved-routes-v129.css' /tmp/apk-files.txt
+          grep -q 'assets/www/ride-dashboard.js' /tmp/apk-files.txt
+          grep -q 'res/drawable/app_logo.png' /tmp/apk-files.txt
+          cp "$APK" ALL-ROAD-BIKE-V131.apk
+          sha256sum ALL-ROAD-BIKE-V131.apk | tee ALL-ROAD-BIKE-V131.sha256
+
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm || true
+
+      - name: Install and launch APK in Android emulator
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 35
+          target: google_apis
+          arch: x86_64
+          profile: pixel_6
+          disable-animations: true
+          emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -noaudio -no-boot-anim
+          script: |
+            adb install -r ALL-ROAD-BIKE-V131.apk
+            adb logcat -c
+            adb shell am force-stop com.allroadbike.app
+            adb shell am start -W -n com.allroadbike.app/.MainActivity | tee /tmp/start.txt
+            grep -q 'Status: ok' /tmp/start.txt
+            sleep 15
+            adb shell dumpsys activity activities | grep -q 'com.allroadbike.app/.MainActivity'
+            adb logcat -d | tee /tmp/logcat.txt
+            grep -q 'ALLROAD.*LOCAL_APP_READY' /tmp/logcat.txt
+            if grep -q 'FATAL EXCEPTION.*com.allroadbike.app' /tmp/logcat.txt; then exit 1; fi
+            adb shell screencap -p /sdcard/all-road-bike-v131.png
+            adb pull /sdcard/all-road-bike-v131.png ALL-ROAD-BIKE-V131-emulator.png
+
+      - name: Upload verified standalone APK and emulator proof
+        uses: actions/upload-artifact@v4
+        with:
+          name: ALL-ROAD-BIKE-V131-STANDALONE-VERIFIED
+          path: |
+            ALL-ROAD-BIKE-V131.apk
+            ALL-ROAD-BIKE-V131.sha256
+            ALL-ROAD-BIKE-V131-emulator.png
+          if-no-files-found: error
+          retention-days: 90
